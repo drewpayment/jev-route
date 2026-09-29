@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: bun test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun test tests
+
+  validate:
+    name: claude plugin validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install -g @anthropic-ai/claude-code
+      # `claude plugin validate` is a static check and should not need an
+      # Anthropic login. continue-on-error is set only as a guard: if a CLI
+      # release starts requiring auth in CI, the job reports the failure
+      # without blocking the push. Read the step log to see the real result.
+      - name: Validate marketplace (descends into the plugin's plugin.json)
+        run: claude plugin validate . --strict
+        continue-on-error: true
+      - name: Validate plugin manifest and hooks module
+        run: claude plugin validate .claude-plugin/plugin.json --strict
+        continue-on-error: true

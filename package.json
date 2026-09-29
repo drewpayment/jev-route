@@ -1,0 +1,11 @@
+{
+  "name": "jev-route",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Claude Code plugin: per-turn model routing with Jev (TypeSafe).",
+  "type": "module",
+  "scripts": {
+    "test": "bun test tests",
+    "validate": "claude plugin validate . --strict && claude plugin validate .claude-plugin/plugin.json --strict"
+  }
+}

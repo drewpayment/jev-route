@@ -1,0 +1,102 @@
+{
+  "name": "jev-route",
+  "version": "0.1.0",
+  "description": "Routes each turn to the cheapest capable Claude model using Jev, TypeSafe's decision model. Toggle with /route.",
+  "author": {
+    "name": "Drew Payment"
+  },
+  "homepage": "https://github.com/drewpayment/jev-route",
+  "repository": "https://github.com/drewpayment/jev-route",
+  "license": "MIT",
+  "keywords": [
+    "routing",
+    "model-routing",
+    "jev",
+    "typesafe",
+    "vercel-ai-gateway",
+    "cost",
+    "hooks-module"
+  ],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "provider": {
+      "type": "string",
+      "title": "Jev provider",
+      "description": "Where to reach Jev: typesafe (api.typesafe.ai), gateway (Vercel AI Gateway) or custom (set jev_base_url).",
+      "default": "typesafe"
+    },
+    "jev_api_key": {
+      "type": "string",
+      "title": "Jev API key",
+      "description": "TypeSafe API key, or Vercel AI Gateway key when provider is gateway. Stored in secure storage.",
+      "sensitive": true,
+      "required": false
+    },
+    "jev_base_url": {
+      "type": "string",
+      "title": "Jev base URL",
+      "description": "Override the API base URL (no trailing slash). Empty derives it from provider; required for provider=custom.",
+      "default": ""
+    },
+    "jev_model": {
+      "type": "string",
+      "title": "Jev model id",
+      "description": "Model id sent to the Jev endpoint.",
+      "default": "jev-latest"
+    },
+    "model_fast": {
+      "type": "string",
+      "title": "Model for fast tier",
+      "description": "Model id or alias used for trivial prompts.",
+      "default": "claude-haiku-4-5"
+    },
+    "model_balanced": {
+      "type": "string",
+      "title": "Model for balanced tier",
+      "description": "Model id or alias used for everyday coding prompts.",
+      "default": "claude-sonnet-5-5"
+    },
+    "model_powerful": {
+      "type": "string",
+      "title": "Model for powerful tier",
+      "description": "Model id or alias used for hard or risky prompts.",
+      "default": "claude-opus-5-5"
+    },
+    "upgrade_confidence": {
+      "type": "number",
+      "title": "Upgrade confidence",
+      "description": "Minimum Jev confidence (0-1) to move a turn to a more capable tier than the session model.",
+      "default": 0.3
+    },
+    "downgrade_confidence": {
+      "type": "number",
+      "title": "Downgrade confidence",
+      "description": "Minimum Jev confidence (0-1) to move a turn to a cheaper tier than the session model.",
+      "default": 0.6
+    },
+    "timeout_ms": {
+      "type": "number",
+      "title": "Jev timeout (ms)",
+      "description": "Hard budget for the Jev call (50-5000); on timeout the session model is kept.",
+      "default": 800
+    },
+    "route_effort": {
+      "type": "boolean",
+      "title": "Route effort too",
+      "description": "Also set effort per tier (fast=low, balanced=medium, powerful=high, risky=max).",
+      "default": true
+    },
+    "fallback_classifier": {
+      "type": "boolean",
+      "title": "Built-in fallback classifier",
+      "description": "When no API key is set, classify with Claude Code's built-in small-model classifier instead.",
+      "default": true
+    },
+    "log_decisions": {
+      "type": "boolean",
+      "title": "Log decisions",
+      "description": "Show a toast with each routing decision (tier, confidence, latency).",
+      "default": false
+    }
+  }
+}
