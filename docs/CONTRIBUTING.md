@@ -51,7 +51,7 @@ Inside the session:
   `$.state` and `$.store` persist.
 - `/route status` and `/route setup` show what the plugin resolved.
 - A session-loaded plugin is `jev-route@inline`, a marketplace install is
-  `jev-route@jev-route`; each has its own `pluginConfigs` and secure-storage key.
+  `jev-route@drewpayment`; each has its own `pluginConfigs` and secure-storage key.
   The settings `env` fallback (`JEV_API_KEY` in `.claude/settings.local.json`) is
   the easiest way to give the checkout a key.
 
@@ -109,6 +109,6 @@ updating DESIGN.md.
    git push origin main --tags        # or: claude plugin tag . --push
    ```
 
-5. Users pick it up with `claude plugin marketplace update jev-route` and
-   `claude plugin update jev-route@jev-route`. A new copy is fetched only when the
+5. Users pick it up with `claude plugin marketplace update drewpayment` and
+   `claude plugin update jev-route@drewpayment`. A new copy is fetched only when the
    `version` string changed, so never push behaviour changes without a bump.

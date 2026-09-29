@@ -34,14 +34,14 @@ dependencies.
 ```sh
 # 1. Register the marketplace (this repository) and install the plugin
 claude plugin marketplace add drewpayment/jev-route
-claude plugin install jev-route@jev-route
+claude plugin install jev-route@drewpayment
 
 # 2. Turn on hooks modules (early access). Add to the "env" block of
 #    ~/.claude/settings.json, keeping any keys already there:
 #    { "env": { "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1" } }
 
 # 3. Configure the provider and key, either non-interactively at install time...
-claude plugin install jev-route@jev-route --config provider=gateway --config jev_api_key=YOUR_KEY
+claude plugin install jev-route@drewpayment --config provider=gateway --config jev_api_key=YOUR_KEY
 #    ...or inside Claude Code with the configure form (enter the key LAST, then Save):
 #    /plugin configure jev-route
 
@@ -64,7 +64,7 @@ one before moving on.
 
 1. Register the marketplace and install the plugin by running, in a shell:
      claude plugin marketplace add drewpayment/jev-route
-     claude plugin install jev-route@jev-route
+     claude plugin install jev-route@drewpayment
    If either command reports the marketplace or plugin already exists, that is fine.
 
 2. Enable hooks modules. Read ~/.claude/settings.json (create it as {} if missing).
@@ -78,7 +78,7 @@ one before moving on.
    never repeat it, never print it in a summary, never write it to any file, and
    never put it in a commit. Offer me two ways to store it and do the one I pick:
      a) Non-interactive: run
-          claude plugin install jev-route@jev-route --config provider=<provider> --config jev_api_key=<key>
+          claude plugin install jev-route@drewpayment --config provider=<provider> --config jev_api_key=<key>
         substituting my answers. Do not echo the command back with the key in it.
      b) Interactive: tell me to run /plugin configure jev-route in Claude Code,
         set "Jev provider" to my answer, and enter the "Jev API key" as the LAST
@@ -220,7 +220,7 @@ restart Claude Code.
 
 **Configured it once, but a session started with `--plugin-dir` (or the installed
 copy) ignores it.** A session-loaded plugin has the id `jev-route@inline`; the
-marketplace install is `jev-route@jev-route`. Claude Code stores `pluginConfigs`
+marketplace install is `jev-route@drewpayment`. Claude Code stores `pluginConfigs`
 and the secure-storage key per id, so each needs its own configuration. Configure
 whichever one you actually run, or use the settings `env` fallback, which both
 read.
@@ -244,8 +244,8 @@ prompts; the built-in fallback keeps everything inside Claude Code.
 ## Updating
 
 ```sh
-claude plugin marketplace update jev-route
-claude plugin update jev-route@jev-route
+claude plugin marketplace update drewpayment
+claude plugin update jev-route@drewpayment
 ```
 
 Then restart Claude Code. A new copy is only fetched when the plugin's `version`

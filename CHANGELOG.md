@@ -28,7 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   leaves the machine; prompts under 3 characters are not graded.
 - Built-in classifier fallback (`$.model.classify`) when no key is configured.
 - Status line `route: <tier> <model> <confidence>[ (kept)]`.
-- Marketplace manifest so the repository installs as `jev-route@jev-route`.
+- Marketplace manifest so the repository installs as `jev-route@drewpayment`.
 
 [Unreleased]: https://github.com/drewpayment/jev-route/compare/jev-route--v0.1.0...HEAD
 [0.1.0]: https://github.com/drewpayment/jev-route/releases/tag/jev-route--v0.1.0

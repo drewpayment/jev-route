@@ -1,7 +1,9 @@
 {
-  "name": "jev-route",
-  "description": "Per-turn Claude model routing with Jev, TypeSafe's decision model",
-  "owner": { "name": "Drew Payment" },
+  "name": "drewpayment",
+  "description": "Drew Payment's Claude Code plugins",
+  "owner": {
+    "name": "Drew Payment"
+  },
   "plugins": [
     {
       "name": "jev-route",
