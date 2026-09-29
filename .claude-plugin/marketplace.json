@@ -9,7 +9,7 @@
       "name": "jev-route",
       "source": "./",
       "description": "Routes each turn to the cheapest capable Claude model using Jev. Toggle with /route.",
-      "version": "0.1.0"
+      "version": "0.2.0"
     }
   ]
 }

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-29
+
 ### Changed
 
 - Hysteresis now anchors on the model the previous turn was routed to (when the
@@ -56,5 +58,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Status line `route: <tier> <model> <confidence>[ (kept)]`.
 - Marketplace manifest so the repository installs as `jev-route@drewpayment`.
 
-[Unreleased]: https://github.com/drewpayment/jev-route/compare/jev-route--v0.1.0...HEAD
+[Unreleased]: https://github.com/drewpayment/jev-route/compare/jev-route--v0.2.0...HEAD
+[0.2.0]: https://github.com/drewpayment/jev-route/compare/jev-route--v0.1.0...jev-route--v0.2.0
 [0.1.0]: https://github.com/drewpayment/jev-route/releases/tag/jev-route--v0.1.0
