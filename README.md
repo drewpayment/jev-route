@@ -3,10 +3,13 @@
 A Claude Code plugin that routes each turn to the cheapest capable Claude model.
 Before a prompt runs, it asks **Jev**, TypeSafe's decision model, how much model
 capability the prompt needs (`fast`, `balanced` or `powerful`) and how risky a
-careless answer would be, then rewrites the model (and, optionally, the effort)
-for every API request of that turn. Trivial prompts go to Haiku, everyday coding
-stays on Sonnet, hard or risky work moves up to Opus, and the whole turn shares one
-model so the prompt cache is kept. Toggle it any time with `/route`. Nothing is
+careless answer would be, then rewrites the model for every API request of that
+turn. Trivial prompts go to Haiku, everyday coding stays on Sonnet, hard or risky
+work moves up to Opus, and the whole turn shares one model so the prompt cache is
+kept. Between turns it is cache-aware too: a routed model is only left when the
+thresholds say so, effort is never changed on a model that is kept, and once the
+conversation is large, downgrades stop (a cold cache write on a cheaper model costs
+more than the turn saves). Toggle it any time with `/route`. Nothing is
 installed beside the plugin itself: no shell hooks, no MCP server, no npm
 dependencies.
 
@@ -127,12 +130,13 @@ All options:
 | `model_fast`           | `claude-haiku-4-5` | model for the fast tier                                              |
 | `model_balanced`       | `claude-sonnet-5-5`           | model for the balanced tier                                          |
 | `model_powerful`       | `claude-opus-5-5`           | model for the powerful tier                                          |
-| `upgrade_confidence`   | `0.3`                       | min confidence to move to a more capable tier than the session model |
-| `downgrade_confidence` | `0.6`                       | min confidence to move to a cheaper tier                             |
+| `upgrade_confidence`   | `0.3`                       | min confidence to move to a more capable tier than the current one   |
+| `downgrade_confidence` | `0.6`                       | min confidence to move to a cheaper tier than the current one        |
+| `switch_lock_tokens`   | `50000`                     | context size (tokens) from which downgrades are blocked; `risky` still moves up; `0` disables the lock |
 | `timeout_ms`           | `800`                       | hard budget (50..5000) for the whole Jev call: fetch, body and parse; on timeout the session model is kept |
-| `route_effort`         | `true`                      | also set effort (fast=low, balanced=medium, powerful=high, risky=max); never sent to haiku |
+| `route_effort`         | `true`                      | when a turn is moved to another model, pin that model's effort too (balanced=medium, powerful=high; never sent to haiku). Never touches the effort of a kept model |
 | `fallback_classifier`  | `true`                      | with no key, use Claude Code's built-in small-model classifier       |
-| `log_decisions`        | `false`                     | toast each decision (tier, confidence, risky, latency)               |
+| `log_decisions`        | `false`                     | toast each decision (tier, confidence, risky, latency) and, when the turn completes, its context size and cache hit rate |
 
 The model fields take full model ids or the aliases `haiku` / `sonnet` / `opus`.
 Current ids at the time of writing: `claude-haiku-4-5`, `claude-sonnet-5-5`,
@@ -148,8 +152,9 @@ its own model.
 /route on
 /route off        stop new decisions; a turn already running keeps its rewrite
 /route status     enabled, provider, base URL (userinfo redacted), key present and
-                  its source, model map, thresholds, config error, last decision,
-                  last error
+                  its source, model map, thresholds, switch lock, config error,
+                  context size of the last request, last decision and its cache
+                  usage, last error
 /route setup      how to set the options and the env flag
 ```
 
@@ -160,19 +165,33 @@ its own model.
    (`fast` / `balanced` / `powerful`, with a confidence) and a `risky` score, under
    one hard deadline (`timeout_ms`). The prompt itself is always passed through
    untouched. Any error or timeout means no decision: the session model runs.
-2. **Hysteresis against the session's current tier** (inferred from the model id,
-   then by family `haiku` < `sonnet` < `opus` < `fable`): upgrade when
+2. **Hysteresis against the current model**: the model the previous turn was routed
+   to, or the session model when the previous turn ran on it (tier inferred from
+   the model id, then by family `haiku` < `sonnet` < `opus` < `fable`). Upgrade when
    `confidence >= upgrade_confidence`, downgrade when
-   `confidence >= downgrade_confidence`, `risky >= 0.7` always goes to `powerful`
-   with effort `max`, otherwise stay.
-3. **Every request of the turn** gets the same model and effort, so the turn shares
-   one prompt cache. Same tier as the session: the session model is kept exactly and
-   only effort is rewritten. Unknown session model or any `fable` session: the model
-   is never changed. A `[1m]` session carries `[1m]` onto the target. Subagent turns
-   are never rewritten.
-4. **Turn complete**: the decision becomes `last`, shown by `/route status` and sent
+   `confidence >= downgrade_confidence`, `risky >= 0.7` always goes to `powerful`,
+   otherwise stay. Coming back from a routed model to the session model is a move
+   like any other and pays the same threshold, so one strong grade cannot flap the
+   conversation between two caches.
+3. **Switch lock**: prompt caches are per model, so leaving a warm model means a
+   cold cache write of the whole conversation on the new one (1.25x the input price
+   against 0.1x for a cache read). Once the context of the last request reaches
+   `switch_lock_tokens`, downgrades are blocked and the status line says
+   `(locked)`; upgrades and `risky` still move up. The context size comes from the
+   `usage` of each request; until one has been seen the lock is off.
+4. **Every request of the turn** gets the same model, so the turn shares one prompt
+   cache. Same tier as the session: the session model is kept exactly and nothing
+   is rewritten, not even effort (an effort change invalidates the messages cache
+   on every model). When the model is rewritten, the tier's effort is pinned with it
+   so every later turn on that model sends the same value. Unknown session model or
+   any `fable` session: nothing is changed. A `[1m]` session carries `[1m]` onto
+   targets that have a 1M window; Haiku has none (200k), so on a `[1m]` session it
+   is only used while the context is known to be under 150k tokens, else the turn
+   takes the next tier up. Subagent turns are never rewritten.
+5. **Turn complete**: the decision becomes `last`, shown by `/route status` and sent
    to Jev as `previous_tier` so "yes", "continue", "now fix the tests" stay on the
-   tier that did the work.
+   tier that did the work. The decision also anchors the next turn's hysteresis
+   (step 2) as long as the session model has not been changed in between.
 
 Fallback: with no key and `fallback_classifier` on, Claude Code's built-in
 classifier picks the tier from the same redacted text (confidence 1.0, no risk
@@ -180,11 +199,12 @@ signal); `/route status` shows `source: builtin`.
 
 ## Status line
 
-`route: <tier> <model> <confidence>[ (kept)]`, for example
+`route: <tier> <model> <confidence>[ (kept)| (locked)]`, for example
 `route: fast claude-haiku-4-5 0.97`, or
-`route: balanced claude-sonnet-5-5 0.41 (kept)` when the session model was kept
-(effort may still have been routed). It is set when the decision settles on the
-first request of the turn. `route: on` means routing is enabled but there is no
+`route: balanced claude-sonnet-5-5 0.41 (kept)` when the session model runs the
+turn untouched, or `route: balanced claude-sonnet-5-5 0.92 (locked)` when a cheaper
+tier was asked for but the context is past `switch_lock_tokens`. It is set when the
+decision settles on the first request of the turn. `route: on` means routing is enabled but there is no
 decision for this turn (Jev failed, timed out, or the prompt was not graded).
 `route: off` when disabled.
 

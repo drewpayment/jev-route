@@ -13,8 +13,12 @@ export const FAMILIES = ['fable', 'opus', 'sonnet', 'haiku'] as const
 export type Family = (typeof FAMILIES)[number]
 const FAMILY_RANK: Record<Family, number> = { haiku: 0, sonnet: 1, opus: 2, fable: 3 }
 
-export function tierEffort(tier: Tier, risky: number | null): Effort {
-  if (risky !== null && risky >= RISKY_THRESHOLD) return 'max'
+/**
+ * Effort for a tier. Effort is a property of the model a turn runs on, never of
+ * the prompt: a top-level effort change invalidates the messages cache on every
+ * model, so `risky` no longer bumps effort (it forces the powerful tier instead).
+ */
+export function tierEffort(tier: Tier): Effort {
   switch (tier) {
     case 'fast':
       return 'low'
@@ -43,9 +47,32 @@ export function family(model: string): Family | null {
   return null
 }
 
+/** Context window, in tokens, of models that have no `[1m]` variant. */
+export const HAIKU_CONTEXT_TOKENS = 200_000
+/**
+ * On a `[1m]` session a model without a 1M window is only routed to while the
+ * context is comfortably inside its window (leaves room for the turn itself).
+ */
+export const SHORT_WINDOW_MAX_CONTEXT = 150_000
+
+/** Does `model` have a `[1m]` variant? The haiku family is capped at 200k. */
+export function supportsLongContext(model: string): boolean {
+  return family(model) !== 'haiku'
+}
+
 function withLongContext(model: string, longContext: boolean): string {
-  if (!longContext || hasLongContext(model)) return model
+  if (!longContext || hasLongContext(model) || !supportsLongContext(model)) return model
   return model + LONG_CONTEXT_SUFFIX
+}
+
+/**
+ * Can a turn with `contextTokens` of context (null = unknown) run on `model`
+ * when the session is a `[1m]` one? Only when the model has a 1M variant, or
+ * the context is known to fit in its window.
+ */
+export function fitsWindow(model: string, longContext: boolean, contextTokens: number | null): boolean {
+  if (!longContext || supportsLongContext(model)) return true
+  return contextTokens !== null && contextTokens < SHORT_WINDOW_MAX_CONTEXT
 }
 
 /** Tier whose map entry equals `model` exactly (raw, then normalized), or null. */
@@ -127,7 +154,7 @@ export function composeDecision(answers: Answers, cfg: Config, source: Source, e
   return {
     tier,
     requested: tier,
-    effort: tierEffort(tier, risky),
+    effort: tierEffort(tier),
     confidence: answers.confidence,
     risky,
     source,
@@ -141,71 +168,216 @@ export function effortApplies(model: string, cfg: Config): boolean {
   return cfg.routeEffort && family(model) !== 'haiku'
 }
 
+/** What the previous turns tell us when a decision is settled. */
+export interface TurnContext {
+  /**
+   * The last completed main-agent decision, when it ran on a routed model
+   * (`rewriteModel`) on this same session model. Hysteresis then anchors on
+   * that model rather than on the session model, so a routed turn is only left
+   * (in either direction) when the thresholds say so.
+   */
+  last?: Decision | null
+  /** Context size in tokens of the previous main-agent request; null when unknown. */
+  contextTokens?: number | null
+}
+
+/** The model hysteresis is measured against: the last routed model, or the session model. */
+export function anchorModel(session: SessionModel, ctx: TurnContext, cfg: Config): SessionModel {
+  const last = ctx.last
+  if (
+    last &&
+    last.rewriteModel === true &&
+    last.agentId === undefined &&
+    typeof last.sessionModel === 'string' &&
+    last.sessionModel === session.model &&
+    session.known &&
+    session.family !== 'fable'
+  ) {
+    const model = last.model
+    return { model, tier: inferTier(model, cfg), family: family(model), known: true, longContext: hasLongContext(model) }
+  }
+  return session
+}
+
+/** Is a downgrade blocked by the size of the context? (`switch_lock_tokens` <= 0 disables the lock.) */
+export function contextLocked(contextTokens: number | null | undefined, cfg: Config): boolean {
+  if (cfg.switchLockTokens <= 0) return false
+  return typeof contextTokens === 'number' && contextTokens >= cfg.switchLockTokens
+}
+
 /**
- * Settle a decision against the session model:
+ * Settle a decision against the session model and the previous turn:
+ *  - hysteresis is measured against the anchor: the model the previous main-agent
+ *    turn was routed to (when the session model is unchanged), else the session model
  *  - risky ≥ 0.7 always wants powerful
- *  - upgrade when confidence ≥ upgradeConfidence, downgrade when ≥ downgradeConfidence
- *  - same tier as the session (or not confident enough) → keep the session model exactly,
- *    route effort only
- *  - unknown session model or a `fable` session → never change the model, effort only
- *  - a `[1m]` session carries the suffix onto the target model
- *  - no effort is sent when the target family is haiku
+ *  - upgrade when confidence ≥ upgradeConfidence
+ *  - downgrade when confidence ≥ downgradeConfidence, and only while the context is
+ *    smaller than switch_lock_tokens: past that a cold cache write on the cheaper
+ *    model costs more than the turn saves, so only `risky` moves the model
+ *  - same tier as the anchor (or not confident enough) → keep the anchor model
+ *  - unknown session model or a `fable` session → never change the model
+ *  - a `[1m]` session carries the suffix onto targets that have a 1M variant; a
+ *    target without one (haiku) is only used while the context is known to fit,
+ *    otherwise the next tier up is taken
+ *  - effort is pinned per model: sent only together with a model rewrite (never
+ *    to haiku), so a kept model also keeps the effort of its cached conversation
  */
-export function resolveDecision(decision: Decision, current: Tier | SessionModel, cfg: Config): Decision {
+export function resolveDecision(decision: Decision, current: Tier | SessionModel, cfg: Config, ctx: TurnContext = {}): Decision {
   const session = typeof current === 'string' ? sessionFromTier(current, cfg) : current
+  const anchor = anchorModel(session, ctx, cfg)
   const forced = decision.risky !== null && decision.risky >= RISKY_THRESHOLD
+  const contextTokens = ctx.contextTokens ?? null
+  const movable = session.known && session.family !== 'fable'
+
   const requested = decision.requested
-  const diff = RANK[requested] - RANK[session.tier]
+  const diff = RANK[requested] - RANK[anchor.tier]
 
   let move: boolean
-  if (forced) move = true
+  let locked = false
+  if (forced) move = diff !== 0
   else if (diff > 0) move = decision.confidence >= cfg.upgradeConfidence
-  else if (diff < 0) move = decision.confidence >= cfg.downgradeConfidence
-  else move = false
+  else if (diff < 0) {
+    move = decision.confidence >= cfg.downgradeConfidence
+    if (move && contextLocked(contextTokens, cfg)) {
+      move = false
+      locked = true
+    }
+  } else move = false
 
-  const tier = move ? requested : session.tier
-  const movable = session.known && session.family !== 'fable'
+  let tier: Tier = move ? requested : anchor.tier
+  // A [1m] session cannot run on a model without a 1M window once the context
+  // may exceed it: take the next tier up that fits.
+  if (movable) {
+    while (!fitsWindow(cfg.models[tier], session.longContext, contextTokens) && RANK[tier] < RANK.powerful) {
+      tier = TIERS[RANK[tier] + 1]
+      move = true
+    }
+  }
 
   let model: string
   let rewriteModel: boolean
-  if (tier === session.tier || !movable) {
+  if (!movable) {
     model = session.model !== '' ? session.model : cfg.models[tier]
+    rewriteModel = false
+    tier = session.tier
+  } else if (!move) {
+    model = anchor.model
+    rewriteModel = model !== session.model
+  } else if (tier === session.tier) {
+    model = session.model
     rewriteModel = false
   } else {
     model = withLongContext(cfg.models[tier], session.longContext)
-    rewriteModel = true
+    rewriteModel = model !== session.model
   }
 
-  const rewrite = rewriteModel || effortApplies(model, cfg)
-  return { ...decision, tier, effort: tierEffort(tier, decision.risky), model, rewrite, rewriteModel }
+  return {
+    ...decision,
+    tier,
+    effort: tierEffort(tier),
+    model,
+    rewrite: rewriteModel,
+    rewriteModel,
+    locked,
+    sessionModel: session.model,
+  }
 }
 
-/** The turn.step patch for a settled decision, or null when nothing changes. */
+/**
+ * The turn.step patch for a settled decision, or null when nothing changes.
+ * Effort rides along with a model rewrite only: the cache of that model is
+ * cold anyway, and every later turn on it sends the same effort.
+ */
 export function stepPatch(d: Decision, cfg: Config): { model?: string; effort?: Effort } | null {
-  const patch: { model?: string; effort?: Effort } = {}
-  if (d.rewriteModel) patch.model = d.model
+  if (!d.rewriteModel) return null
+  const patch: { model?: string; effort?: Effort } = { model: d.model }
   if (effortApplies(d.model, cfg)) patch.effort = d.effort
-  return patch.model !== undefined || patch.effort !== undefined ? patch : null
+  return patch
 }
 
 /**
  * Full pipeline used by tests: returns the settled Decision when it patches
  * anything (model and/or effort), or null when the request is left untouched.
  */
-export function decide(answers: Answers, current: Tier | SessionModel, cfg: Config, source: Source = 'jev'): Decision | null {
-  const d = resolveDecision(composeDecision(answers, cfg, source), current, cfg)
+export function decide(answers: Answers, current: Tier | SessionModel, cfg: Config, source: Source = 'jev', ctx: TurnContext = {}): Decision | null {
+  const d = resolveDecision(composeDecision(answers, cfg, source), current, cfg, ctx)
   return d.rewrite ? d : null
 }
 
+/** ` (kept)` when the session model runs the turn, ` (locked)` when a downgrade was blocked by context size. */
+export function decisionSuffix(d: Decision): string {
+  if (d.locked) return ' (locked)'
+  return d.rewrite === false || d.rewriteModel === false ? ' (kept)' : ''
+}
+
 /**
- * Status-line text: `route: <tier> <model> <conf>[ (kept)]` after a decision,
- * `route: on` when routing is enabled with no decision, `route: off` when disabled.
- * `(kept)` means the session model was not changed.
+ * Status-line text: `route: <tier> <model> <conf>[ (kept)| (locked)]` after a
+ * decision, `route: on` when routing is enabled with no decision, `route: off`
+ * when disabled. `(kept)` means the session model runs the turn; `(locked)`
+ * means a cheaper tier was asked for but the context is past switch_lock_tokens.
  */
 export function statusText(d: Decision | null, enabled: boolean): string {
   if (!enabled) return 'route: off'
   if (!d) return 'route: on'
-  const conf = d.confidence.toFixed(2)
-  const kept = d.rewrite === false || d.rewriteModel === false ? ' (kept)' : ''
-  return `route: ${d.tier} ${d.model} ${conf}${kept}`
+  return `route: ${d.tier} ${d.model} ${d.confidence.toFixed(2)}${decisionSuffix(d)}`
+}
+
+/** Token fields of a turn.step result's `usage` (snake_case per the API, camelCase tolerated). */
+export interface StepUsage {
+  input: number
+  cacheRead: number
+  cacheWrite: number
+}
+
+function usageNumber(u: Record<string, unknown>, snake: string, camel: string): number {
+  const v = u[snake] ?? u[camel]
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0
+}
+
+/** Read the token counts out of a turn.step result, or null when it carries no usage. */
+export function stepUsage(result: unknown): StepUsage | null {
+  if (typeof result !== 'object' || result === null) return null
+  const usage = (result as { usage?: unknown }).usage
+  if (typeof usage !== 'object' || usage === null) return null
+  const u = usage as Record<string, unknown>
+  const s = {
+    input: usageNumber(u, 'input_tokens', 'inputTokens'),
+    cacheRead: usageNumber(u, 'cache_read_input_tokens', 'cacheReadInputTokens'),
+    cacheWrite: usageNumber(u, 'cache_creation_input_tokens', 'cacheCreationInputTokens'),
+  }
+  return s.input + s.cacheRead + s.cacheWrite > 0 ? s : null
+}
+
+/** Context size of the request that produced `u`: everything the model read. */
+export function contextTokensOf(u: StepUsage): number {
+  return u.input + u.cacheRead + u.cacheWrite
+}
+
+/** Running per-turn totals stored on the decision. */
+export interface TurnUsage extends StepUsage {
+  steps: number
+  /** Context size of the last step of the turn. */
+  context: number
+}
+
+export function addUsage(prev: TurnUsage | undefined, u: StepUsage): TurnUsage {
+  return {
+    steps: (prev?.steps ?? 0) + 1,
+    input: (prev?.input ?? 0) + u.input,
+    cacheRead: (prev?.cacheRead ?? 0) + u.cacheRead,
+    cacheWrite: (prev?.cacheWrite ?? 0) + u.cacheWrite,
+    context: contextTokensOf(u),
+  }
+}
+
+/** `152k` / `830` style token count for status text. */
+export function tokensText(n: number): string {
+  return n >= 1000 ? `${Math.round(n / 1000)}k` : String(n)
+}
+
+/** One-line cache summary: `ctx 152k, cache read 96% (3 steps)`. */
+export function usageText(u: TurnUsage): string {
+  const total = u.input + u.cacheRead + u.cacheWrite
+  const pct = total > 0 ? Math.round((u.cacheRead / total) * 100) : 0
+  return `ctx ${tokensText(u.context)}, cache read ${pct}% (${u.steps} step${u.steps === 1 ? '' : 's'})`
 }

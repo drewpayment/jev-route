@@ -83,6 +83,9 @@ Keep these or the module fails the static scan or is refused at load:
 - **One decision per turn.** Decide on the first `turn.step` and apply the same
   patch to every request of the turn; a mid-turn model change discards the prompt
   cache.
+- **Caches are per model and per effort.** Between turns, leave a warm model alone
+  unless the thresholds say otherwise, and never send `effort` without a model
+  rewrite: a top-level effort change invalidates the messages cache too.
 - **Events are frozen.** Rewrite with `next({ ...e, model, effort })`; pinned
   fields (`turnId`, `index`, `agentId`) cannot change.
 

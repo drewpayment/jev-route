@@ -15,7 +15,19 @@
 import type { Register } from 'claude-code'
 import { atom, read, update } from 'claude-code'
 import { checkApiKey, defaultEnabled, hasJev, redactUrl, resolveConfig, routingSource, type Config } from './config.ts'
-import { composeDecision, describeSession, resolveDecision, statusText, stepPatch } from './decide.ts'
+import {
+  addUsage,
+  composeDecision,
+  contextTokensOf,
+  decisionSuffix,
+  describeSession,
+  resolveDecision,
+  statusText,
+  stepPatch,
+  stepUsage,
+  tokensText,
+  usageText,
+} from './decide.ts'
 import { isEligible, redactSecrets, truncateState } from './eligibility.ts'
 import { buildRequest, describeStatus, parseResponse } from './jev.ts'
 import { TIERS, type Answers, type Decision, type Tier } from './types.ts'
@@ -27,6 +39,7 @@ const PROMPT_KEY_CHARS = 200
 const pendingAtom = atom({ plugin: 'jev-route', key: 'pending' } as const, {} as Record<string, Decision>)
 const unboundAtom = atom({ plugin: 'jev-route', key: 'unbound' } as const, null as Decision | null)
 const lastAtom = atom({ plugin: 'jev-route', key: 'last' } as const, null as Decision | null)
+const contextAtom = atom({ plugin: 'jev-route', key: 'context' } as const, null as number | null)
 
 // Diagnostics for `/route status`; module-level, so they reset on reload.
 let lastError: string | null = null
@@ -275,17 +288,21 @@ async function statusReport($: any, cfg: Config, enabled: boolean): Promise<stri
     `  source:       ${routingSource(cfg) ?? 'none'}`,
     `  models:       fast=${cfg.models.fast}  balanced=${cfg.models.balanced}  powerful=${cfg.models.powerful}`,
     `  thresholds:   upgrade>=${cfg.upgradeConfidence}  downgrade>=${cfg.downgradeConfidence}  risky>=0.7`,
-    `  effort:       ${cfg.routeEffort ? 'routed with tier (never for haiku)' : 'untouched'}`,
+    `  switch lock:  ${cfg.switchLockTokens > 0 ? `downgrades blocked from ${tokensText(cfg.switchLockTokens)} tokens of context` : 'off'}`,
+    `  effort:       ${cfg.routeEffort ? 'pinned per model when the model is rewritten (never for haiku)' : 'untouched'}`,
     `  timeout:      ${cfg.timeoutMs}ms`,
     `  fallback:     ${cfg.fallbackClassifier ? 'built-in classifier when no key' : 'off'}`,
   ]
   if (cfg.configError) lines.push(`  config error: ${cfg.configError}`)
+  const context = await read($, contextAtom)
+  lines.push(`  context:      ${typeof context === 'number' ? `${tokensText(context)} tokens (last main-agent request)` : 'unknown (no usage seen yet)'}`)
   if (last) {
     const risky = last.risky !== null ? `  risky=${last.risky.toFixed(2)}` : ''
-    const kept = last.rewrite === false || last.rewriteModel === false ? ' (kept)' : ''
+    const effort = last.rewriteModel ? `  effort=${last.effort}` : ''
     lines.push(
-      `  last:         ${last.tier}${kept}  model=${last.model}  conf=${last.confidence.toFixed(2)}${risky}  effort=${last.effort}  ${last.latencyMs ?? '?'}ms  via ${last.source}`,
+      `  last:         ${last.tier}${decisionSuffix(last)}  model=${last.model}  conf=${last.confidence.toFixed(2)}${risky}${effort}  ${last.latencyMs ?? '?'}ms  via ${last.source}`,
     )
+    if (last.usage) lines.push(`  last usage:   ${usageText(last.usage)}`)
   } else {
     lines.push('  last:         (no decision yet)')
   }
@@ -315,6 +332,25 @@ function setupText($: any): string {
     '',
     'Without a key, the built-in classifier is used when fallback_classifier is on.',
   ].join('\n')
+}
+
+// ---- usage from turn.step results ----------------------------------------
+
+/**
+ * Remember what the step cost: the main agent's context size (anchors the
+ * next decision's switch lock) and, for a routed turn, its running totals.
+ */
+async function recordUsage($: any, result: unknown, turnId: string | undefined, agentId: string | undefined): Promise<void> {
+  const u = stepUsage(result)
+  if (!u) return
+  if (agentId === undefined) await update($, contextAtom, () => contextTokensOf(u))
+  if (!turnId) return
+  await update($, pendingAtom, (p) => {
+    const all = p ?? {}
+    const d = all[turnId]
+    if (!d || !sameAgent(d.agentId, agentId)) return all
+    return { ...all, [turnId]: { ...d, usage: addUsage(d.usage, u) } }
+  })
 }
 
 // ---- hooks --------------------------------------------------------------
@@ -441,19 +477,27 @@ export const register: Register = (on, options) => {
   // from next() and returns its result.
   on('turn.step', async function* ($, e, next) {
     let patch: typeof e = e
+    // Parsed before anything that can throw, so recordUsage below never mistakes
+    // a subagent step for the main agent's.
+    const ev = asRecord(e)
+    const turnId = asId(ev.turnId)
+    const agentId = asId(ev.agentId)
     try {
       const cfg = await currentConfig($, base)
-      const ev = asRecord(e)
-      const turnId = asId(ev.turnId)
       if (turnId) {
         const pending = (await read($, pendingAtom)) ?? {}
         let d: Decision | undefined = pending[turnId]
-        if (d && sameAgent(d.agentId, asId(ev.agentId))) {
+        if (d && sameAgent(d.agentId, agentId)) {
           if (d.rewrite === undefined) {
-            // First step of the turn: settle the decision against the session model, once.
-            const settled = resolveDecision(d, describeSession(ev.model, cfg), cfg)
+            // First step of the turn: settle the decision against the session model
+            // and the previous main-agent turn (anchor model, context size), once.
+            const main = agentId === undefined
+            const settled = resolveDecision(d, describeSession(ev.model, cfg), cfg, {
+              last: main ? await read($, lastAtom) : null,
+              contextTokens: main ? await read($, contextAtom) : null,
+            })
             d = settled
-            await update($, pendingAtom, (p) => ({ ...(p ?? {}), [turnId]: settled }))
+            await update($, pendingAtom, (p) => ({ ...(p ?? {}), [turnId!]: settled }))
             $.ui.status(statusText(settled, true))
           }
           const change = stepPatch(d, cfg)
@@ -463,7 +507,13 @@ export const register: Register = (on, options) => {
     } catch {
       patch = e
     }
-    return yield* next(patch)
+    const result = yield* next(patch)
+    try {
+      await recordUsage($, result, turnId, agentId)
+    } catch {
+      // usage is diagnostics only
+    }
+    return result
   })
 
   on('turn.complete', async ($, e, next) => {
@@ -474,12 +524,15 @@ export const register: Register = (on, options) => {
       const pending = (await read($, pendingAtom)) ?? {}
       const d = turnId ? pending[turnId] : undefined
       if (d && turnId && sameAgent(d.agentId, agentId)) {
-        await update($, lastAtom, () => d)
+        if (agentId === undefined) await update($, lastAtom, () => d)
         await update($, pendingAtom, (p) => {
           const rest = { ...(p ?? {}) }
           delete rest[turnId]
           return rest
         })
+        if (d.usage && (await currentConfig($, base)).logDecisions) {
+          $.ui.toast(`route: ${d.tier} ${d.model}${decisionSuffix(d)}: ${usageText(d.usage)}`)
+        }
       } else if (agentId === undefined) {
         // The main agent finished a turn we did not route: `previous_tier` must not
         // point at an older turn than the one just completed.
