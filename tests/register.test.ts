@@ -94,13 +94,13 @@ async function drain(gen: AsyncGenerator<unknown, unknown, unknown>) {
 }
 
 /** A fake downstream for turn.step that records the patch it received. */
-function stepNext() {
+function stepNext(usage?: Record<string, number>) {
   const seen: any[] = []
   const next = async function* (patch: any) {
     seen.push(patch)
     yield { type: 'text', text: 'chunk-1' }
     yield { type: 'text', text: 'chunk-2' }
-    return { answer: 'ok', stopReason: 'end_turn' }
+    return usage ? { answer: 'ok', stopReason: 'end_turn', usage } : { answer: 'ok', stopReason: 'end_turn' }
   }
   return { next, seen }
 }
@@ -122,15 +122,20 @@ async function submit(hooks: Map<string, Hook>, $: any, e: Record<string, unknow
   return { out, seen: p.seen }
 }
 
-async function step(hooks: Map<string, Hook>, $: any, e: Record<string, unknown>) {
-  const s = stepNext()
+async function step(hooks: Map<string, Hook>, $: any, e: Record<string, unknown>, usage?: Record<string, number>) {
+  const s = stepNext(usage)
   const drained = await drain(hooks.get('turn.step')!($, e, s.next))
   return { ...drained, patch: s.seen[0], seen: s.seen }
 }
 
+const complete = (hooks: Map<string, Hook>, $: any, e: Record<string, unknown>) => hooks.get('turn.complete')!($, e, passNext().next)
+
 const pending = () => (state.get('jev-route.pending') ?? {}) as Record<string, any>
 const unbound = () => state.get('jev-route.unbound') as any
 const last = () => state.get('jev-route.last') as any
+const context = () => state.get('jev-route.context') as number | null | undefined
+
+const USAGE = { input_tokens: 2_000, cache_read_input_tokens: 118_000, cache_creation_input_tokens: 500 }
 
 beforeEach(() => {
   state.clear()
@@ -386,27 +391,149 @@ describe('turn.step', () => {
     expect(patch).toEqual({ turnId: 'tX', index: 0, model: SONNET })
   })
 
-  test('same tier keeps the session model and routes effort; haiku target gets no effort', async () => {
+  test('same tier keeps the session model and its effort; haiku target gets no effort', async () => {
     const { hooks, $, calls } = await routed()
     const kept = await step(hooks, $, { turnId: 't1', index: 0, model: 'claude-opus-5' })
-    expect(kept.patch.model).toBe('claude-opus-5')
-    expect(kept.patch.effort).toBe('high')
+    expect(kept.patch).toEqual({ turnId: 't1', index: 0, model: 'claude-opus-5' })
     expect(calls.status[0]).toBe('route: powerful claude-opus-5 0.90 (kept)')
 
     state.clear()
     const hooks2 = load(OPTS)
     const fake2 = fakeDollar({ http: { fetch: async () => jevResponse('fast', 0.95) } })
     await submit(hooks2, fake2.$, { text: 'rename this variable', turnId: 't1' })
-    const down = await step(hooks2, fake2.$, { turnId: 't1', index: 0, model: `${SONNET}[1m]` })
-    expect(down.patch.model).toBe(`${HAIKU}[1m]`)
+    const down = await step(hooks2, fake2.$, { turnId: 't1', index: 0, model: SONNET })
+    expect(down.patch.model).toBe(HAIKU)
     expect('effort' in down.patch).toBe(false)
   })
 
-  test('unknown session model: effort only', async () => {
+  test('a [1m] session never routes to haiku unless the context is known to fit', async () => {
+    const hooks = load(OPTS)
+    const fake = fakeDollar({ http: { fetch: async () => jevResponse('fast', 0.95) } })
+    await submit(hooks, fake.$, { text: 'rename this variable', turnId: 't1' })
+    const unknown = await step(hooks, fake.$, { turnId: 't1', index: 0, model: `${SONNET}[1m]` })
+    expect(unknown.patch).toEqual({ turnId: 't1', index: 0, model: `${SONNET}[1m]` })
+    expect(fake.calls.status[0]).toBe(`route: balanced ${SONNET}[1m] 0.95 (kept)`)
+
+    state.clear()
+    state.set('jev-route.context', 30_000)
+    const hooks2 = load(OPTS)
+    const fake2 = fakeDollar({ http: { fetch: async () => jevResponse('fast', 0.95) } })
+    await submit(hooks2, fake2.$, { text: 'rename this variable', turnId: 't1' })
+    const small = await step(hooks2, fake2.$, { turnId: 't1', index: 0, model: `${SONNET}[1m]` })
+    expect(small.patch.model).toBe(HAIKU)
+    const up = await step(hooks2, fake2.$, { turnId: 't2', index: 0, model: `${SONNET}[1m]` })
+    expect(up.patch.model).toBe(`${SONNET}[1m]`)
+  })
+
+  test('unknown session model: nothing patched', async () => {
     const { hooks, $ } = await routed()
     const { patch } = await step(hooks, $, { turnId: 't1', index: 0, model: 'mystery-model' })
-    expect(patch.model).toBe('mystery-model')
-    expect(patch.effort).toBe('high')
+    expect(patch).toEqual({ turnId: 't1', index: 0, model: 'mystery-model' })
+  })
+
+  test('records the main agent context size and the turn usage from the step result', async () => {
+    const { hooks, $ } = await routed()
+    expect(context()).toBeUndefined()
+    const first = await step(hooks, $, { turnId: 't1', index: 0, model: SONNET }, USAGE)
+    expect(first.result).toEqual({ answer: 'ok', stopReason: 'end_turn', usage: USAGE })
+    expect(context()).toBe(120_500)
+    expect(pending().t1.usage).toEqual({ steps: 1, input: 2_000, cacheRead: 118_000, cacheWrite: 500, context: 120_500 })
+    await step(hooks, $, { turnId: 't1', index: 1, model: SONNET }, { input_tokens: 100, cache_read_input_tokens: 121_000 })
+    expect(context()).toBe(121_100)
+    expect(pending().t1.usage.steps).toBe(2)
+    expect(pending().t1.usage.cacheRead).toBe(239_000)
+    // a step without usage changes nothing
+    await step(hooks, $, { turnId: 't1', index: 2, model: SONNET })
+    expect(context()).toBe(121_100)
+    expect(pending().t1.usage.steps).toBe(2)
+    // subagent steps never touch the main-agent context
+    await step(hooks, $, { turnId: 'sub', index: 0, model: SONNET, agentId: 'agent-7' }, { input_tokens: 5 })
+    expect(context()).toBe(121_100)
+  })
+
+  test('an unrouted main-agent turn still records the context size', async () => {
+    const hooks = load(OPTS)
+    const { $ } = fakeDollar()
+    await step(hooks, $, { turnId: 'tX', index: 0, model: SONNET }, USAGE)
+    expect(context()).toBe(120_500)
+    expect(pending()).toEqual({})
+  })
+
+  test('downgrades are locked once the context is past switch_lock_tokens', async () => {
+    const hooks = load(OPTS)
+    const fake = fakeDollar({ http: { fetch: async () => jevResponse('fast', 0.95) } })
+    await submit(hooks, fake.$, { text: 'rename this variable', turnId: 't1' })
+    await step(hooks, fake.$, { turnId: 't1', index: 0, model: SONNET }, USAGE)
+    // t1 was decided with an unknown context: it went to haiku
+    expect(pending().t1.model).toBe(HAIKU)
+    await complete(hooks, fake.$, { turnId: 't1' })
+    // t2 sees 120k of context and a haiku anchor; the balanced grade is an upgrade, back to Sonnet
+    fake.$.http.fetch = async () => jevResponse('balanced', 0.5)
+    await submit(hooks, fake.$, { text: 'now explain the module', turnId: 't2' })
+    const t2 = await step(hooks, fake.$, { turnId: 't2', index: 0, model: SONNET }, USAGE)
+    expect(t2.patch).toEqual({ turnId: 't2', index: 0, model: SONNET })
+    await complete(hooks, fake.$, { turnId: 't2' })
+    // t3 asks for haiku with high confidence: locked
+    fake.$.http.fetch = async () => jevResponse('fast', 0.99)
+    await submit(hooks, fake.$, { text: 'rename it again', turnId: 't3' })
+    const t3 = await step(hooks, fake.$, { turnId: 't3', index: 0, model: SONNET })
+    expect(t3.patch).toEqual({ turnId: 't3', index: 0, model: SONNET })
+    expect(pending().t3.locked).toBe(true)
+    expect(fake.calls.status.at(-1)).toBe(`route: balanced ${SONNET} 0.99 (locked)`)
+  })
+
+  test('switch_lock_tokens 0 disables the lock', async () => {
+    state.set('jev-route.context', 900_000)
+    const hooks = load({ ...OPTS, switch_lock_tokens: 0 })
+    const fake = fakeDollar({ http: { fetch: async () => jevResponse('fast', 0.95) } })
+    await submit(hooks, fake.$, { text: 'rename this variable', turnId: 't1' })
+    const { patch } = await step(hooks, fake.$, { turnId: 't1', index: 0, model: SONNET })
+    expect(patch.model).toBe(HAIKU)
+  })
+
+  test('the next turn anchors on the model the previous turn was routed to', async () => {
+    const { hooks, $, calls } = await routed()
+    await step(hooks, $, { turnId: 't1', index: 0, model: SONNET })
+    await complete(hooks, $, { turnId: 't1' })
+    expect(last().model).toBe(OPUS)
+    expect(last().sessionModel).toBe(SONNET)
+    // a balanced grade below the downgrade threshold stays on Opus: rewritten again, same effort
+    $.http.fetch = async () => jevResponse('balanced', 0.4)
+    await submit(hooks, $, { text: 'and now add the tests', turnId: 't2' })
+    const t2 = await step(hooks, $, { turnId: 't2', index: 0, model: SONNET })
+    expect(t2.patch.model).toBe(OPUS)
+    expect(t2.patch.effort).toBe('high')
+    expect(calls.status.at(-1)).toBe(`route: powerful ${OPUS} 0.40`)
+    await complete(hooks, $, { turnId: 't2' })
+    // confident enough: back to the session model, nothing patched
+    $.http.fetch = async () => jevResponse('balanced', 0.7)
+    await submit(hooks, $, { text: 'rename the helper', turnId: 't3' })
+    const t3 = await step(hooks, $, { turnId: 't3', index: 0, model: SONNET })
+    expect(t3.patch).toEqual({ turnId: 't3', index: 0, model: SONNET })
+    expect(calls.status.at(-1)).toBe(`route: balanced ${SONNET} 0.70 (kept)`)
+  })
+
+  test('a session model change since the last turn drops the anchor', async () => {
+    const { hooks, $ } = await routed()
+    await step(hooks, $, { turnId: 't1', index: 0, model: SONNET })
+    await complete(hooks, $, { turnId: 't1' })
+    $.http.fetch = async () => jevResponse('balanced', 0.1)
+    await submit(hooks, $, { text: 'and now add the tests', turnId: 't2' })
+    // the user ran /model in between: the turn runs on what they chose
+    const t2 = await step(hooks, $, { turnId: 't2', index: 0, model: 'claude-sonnet-4-6' })
+    expect(t2.patch).toEqual({ turnId: 't2', index: 0, model: 'claude-sonnet-4-6' })
+  })
+
+  test('an unrouted turn in between resets the anchor to the session model', async () => {
+    const { hooks, $ } = await routed()
+    await step(hooks, $, { turnId: 't1', index: 0, model: SONNET })
+    await complete(hooks, $, { turnId: 't1' })
+    await complete(hooks, $, { turnId: 't-unrouted' })
+    expect(last()).toBeNull()
+    $.http.fetch = async () => jevResponse('balanced', 0.1)
+    await submit(hooks, $, { text: 'and now add the tests', turnId: 't3' })
+    const t3 = await step(hooks, $, { turnId: 't3', index: 0, model: SONNET })
+    expect(t3.patch).toEqual({ turnId: 't3', index: 0, model: SONNET })
   })
 
   test('route_effort off and same tier: passes through untouched', async () => {
@@ -490,6 +617,25 @@ describe('turn.complete', () => {
     expect(last()).toBeNull()
   })
 
+  test('last carries the turn usage and log_decisions toasts it', async () => {
+    const hooks = load({ ...OPTS, log_decisions: true })
+    const fake = fakeDollar()
+    await submit(hooks, fake.$, { text: 'refactor the whole auth layer', turnId: 't1' })
+    await step(hooks, fake.$, { turnId: 't1', index: 0, model: SONNET }, USAGE)
+    await step(hooks, fake.$, { turnId: 't1', index: 1, model: SONNET }, { input_tokens: 500, cache_read_input_tokens: 120_500 })
+    await complete(hooks, fake.$, { turnId: 't1' })
+    expect(last().usage).toEqual({ steps: 2, input: 2_500, cacheRead: 238_500, cacheWrite: 500, context: 121_000 })
+    expect(fake.calls.toast.at(-1)).toBe(`route: powerful ${OPUS}: ctx 121k, cache read 99% (2 steps)`)
+    expect(fake.calls.toast).toHaveLength(2)
+  })
+
+  test('no usage toast without log_decisions or without usage', async () => {
+    const { hooks, $, calls } = await running()
+    await complete(hooks, $, { turnId: 't1' })
+    expect(calls.toast).toHaveLength(0)
+    expect(last().usage).toBeUndefined()
+  })
+
   test('previous_tier follows last', async () => {
     const { hooks, $, calls } = await running()
     await hooks.get('turn.complete')!($, { turnId: 't1' }, passNext().next)
@@ -545,7 +691,20 @@ describe('command.run /route', () => {
     await hooks.get('turn.complete')!($, { turnId: 't1' }, passNext().next)
     const { text } = await hooks.get('command.run')!($, { args: 'status' })
     expect(text).toContain(`last:         powerful  model=${OPUS}  conf=0.90`)
+    expect(text).toContain('effort=high')
+    expect(text).toContain('context:      unknown')
+    expect(text).toContain('switch lock:  downgrades blocked from 50k tokens')
+    expect(text).not.toContain('last usage:')
     expect(text).not.toContain(KEY)
+
+    await submit(hooks, $, { text: 'refactor the whole auth layer again', turnId: 't2' })
+    await step(hooks, $, { turnId: 't2', index: 0, model: SONNET }, USAGE)
+    await hooks.get('turn.complete')!($, { turnId: 't2' }, passNext().next)
+    const again = (await hooks.get('command.run')!($, { args: 'status' })).text
+    expect(again).toContain('context:      121k tokens')
+    expect(again).toContain('last usage:   ctx 121k, cache read 98% (1 step)')
+    const off = (await load({ ...OPTS, switch_lock_tokens: 0 }).get('command.run')!($, { args: 'status' })).text
+    expect(off).toContain('switch lock:  off')
   })
 
   test('setup and unknown arguments', async () => {

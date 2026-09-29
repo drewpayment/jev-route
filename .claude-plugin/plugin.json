@@ -65,14 +65,20 @@
     "upgrade_confidence": {
       "type": "number",
       "title": "Upgrade confidence",
-      "description": "Minimum Jev confidence (0-1) to move a turn to a more capable tier than the session model.",
+      "description": "Minimum Jev confidence (0-1) to move a turn to a more capable tier than the current model (the one the previous turn ran on).",
       "default": 0.3
     },
     "downgrade_confidence": {
       "type": "number",
       "title": "Downgrade confidence",
-      "description": "Minimum Jev confidence (0-1) to move a turn to a cheaper tier than the session model.",
+      "description": "Minimum Jev confidence (0-1) to move a turn to a cheaper tier than the current model, including back from a routed model to the session model. Blocked past switch_lock_tokens.",
       "default": 0.6
+    },
+    "switch_lock_tokens": {
+      "type": "number",
+      "title": "Switch lock (tokens)",
+      "description": "Once the conversation context reaches this many tokens, turns stay on the current model unless risky: a cold prompt-cache write on a cheaper model costs more than the turn saves. 0 disables the lock.",
+      "default": 50000
     },
     "timeout_ms": {
       "type": "number",
@@ -83,7 +89,7 @@
     "route_effort": {
       "type": "boolean",
       "title": "Route effort too",
-      "description": "Also set effort per tier (fast=low, balanced=medium, powerful=high, risky=max).",
+      "description": "When a turn is moved to another model, also pin that model's effort (balanced=medium, powerful=high; haiku takes none). Effort is never changed on a kept model, since that would invalidate its prompt cache.",
       "default": true
     },
     "fallback_classifier": {
@@ -95,7 +101,7 @@
     "log_decisions": {
       "type": "boolean",
       "title": "Log decisions",
-      "description": "Show a toast with each routing decision (tier, confidence, latency).",
+      "description": "Show a toast with each routing decision (tier, confidence, latency) and, when the turn completes, its context size and cache hit rate.",
       "default": false
     }
   }

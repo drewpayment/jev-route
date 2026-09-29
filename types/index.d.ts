@@ -6,6 +6,14 @@ export type Tier = 'fast' | 'balanced' | 'powerful'
 export type Effort = 'low' | 'medium' | 'high' | 'max'
 export type Source = 'jev' | 'builtin'
 
+export interface TurnUsage {
+  steps: number
+  input: number
+  cacheRead: number
+  cacheWrite: number
+  context: number
+}
+
 export interface Decision {
   tier: Tier
   requested: Tier
@@ -16,6 +24,9 @@ export interface Decision {
   model: string
   rewrite?: boolean
   rewriteModel?: boolean
+  locked?: boolean
+  sessionModel?: string
+  usage?: TurnUsage
   turnId?: string
   agentId?: string
   promptKey?: string
@@ -30,8 +41,10 @@ declare module 'claude-code' {
       pending: Record<string, Decision>
       /** Decision composed at prompt.submit whose turnId is not yet known. */
       unbound: Decision | null
-      /** Decision of the most recent completed main-agent turn (for /route status and previous_tier). */
+      /** Decision of the most recent completed main-agent turn (for /route status, previous_tier and the hysteresis anchor). */
       last: Decision | null
+      /** Context size in tokens of the most recent main-agent request, from its turn.step result; null until one is seen. */
+      context: number | null
     }
   }
 }

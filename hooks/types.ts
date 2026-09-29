@@ -17,6 +17,16 @@ export interface Answers {
   probabilities?: Partial<Record<Tier, number>>
 }
 
+/** Running token totals of one turn, summed over its turn.step results. */
+export interface TurnUsage {
+  steps: number
+  input: number
+  cacheRead: number
+  cacheWrite: number
+  /** Context size (input + cache read + cache write) of the turn's last step. */
+  context: number
+}
+
 /** A per-turn routing decision. */
 export interface Decision {
   /** Tier the turn runs on (after hysteresis: may be the current tier). */
@@ -37,6 +47,12 @@ export interface Decision {
   rewrite?: boolean
   /** true when `model` differs from the session model (settled decisions only). */
   rewriteModel?: boolean
+  /** true when a cheaper tier was asked for but the context is past switch_lock_tokens. */
+  locked?: boolean
+  /** The session model (`e.model`) the decision was settled against; anchors the next turn. */
+  sessionModel?: string
+  /** Token totals of the turn's steps, from the turn.step results (absent when the engine reports none). */
+  usage?: TurnUsage
   /** Turn this decision is bound to; absent until turn.start binds it. */
   turnId?: string
   /** Agent that ran the turn (undefined = main agent). */

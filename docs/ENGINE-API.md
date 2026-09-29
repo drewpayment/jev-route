@@ -74,7 +74,14 @@ Engine behaviours:
 - "a request resuming a truncated thought keeps its model; a model rewrite applies
   from the next request".
 - Result of `next(e)`: `{ answer: string, toolUses: [...], stopReason, usage }`.
+  `usage` is expected to carry the API's `input_tokens`,
+  `cache_read_input_tokens` and `cache_creation_input_tokens` (camelCase spellings
+  are tolerated); their sum is the context size of that request. Unverified live:
+  the plugin treats a result without them as "no usage".
 - Changing the model mid-turn discards the prompt cache. Decide once per turn.
+  Caches are per model, and a top-level `effort` change invalidates the messages
+  cache too, so between turns the plugin only rewrites effort together with a model
+  rewrite.
 
 ### `agent.spawn` (phase 2)
 Event includes `{ model?, prompt, ... }`; identity fields are pinned. A rewrite can set

@@ -17,6 +17,8 @@ export interface Config {
   models: Record<Tier, string>
   upgradeConfidence: number
   downgradeConfidence: number
+  /** Context size (tokens) from which downgrades are blocked; <= 0 disables the lock. */
+  switchLockTokens: number
   timeoutMs: number
   routeEffort: boolean
   fallbackClassifier: boolean
@@ -40,6 +42,7 @@ export const DEFAULTS = {
   model_powerful: 'claude-opus-5-5',
   upgrade_confidence: 0.3,
   downgrade_confidence: 0.6,
+  switch_lock_tokens: 50_000,
   timeout_ms: 800,
   route_effort: true,
   fallback_classifier: true,
@@ -169,6 +172,7 @@ export function resolveConfig(options: unknown): Config {
     },
     upgradeConfidence: clamp01(asNumber(readOption(options, 'upgrade_confidence'), DEFAULTS.upgrade_confidence)),
     downgradeConfidence: clamp01(asNumber(readOption(options, 'downgrade_confidence'), DEFAULTS.downgrade_confidence)),
+    switchLockTokens: Math.floor(asNumber(readOption(options, 'switch_lock_tokens'), DEFAULTS.switch_lock_tokens)),
     timeoutMs: clamp(asNumber(readOption(options, 'timeout_ms'), DEFAULTS.timeout_ms), TIMEOUT_MIN_MS, TIMEOUT_MAX_MS),
     routeEffort: asBoolean(readOption(options, 'route_effort'), DEFAULTS.route_effort),
     fallbackClassifier: asBoolean(readOption(options, 'fallback_classifier'), DEFAULTS.fallback_classifier),
